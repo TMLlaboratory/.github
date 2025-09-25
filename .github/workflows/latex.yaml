@@ -1,0 +1,123 @@
+name: "LaTeX Build (Based on xu-cheng/latex-action)"
+
+on:
+  workflow_call:
+    inputs:
+      root_file:
+        description: "Entry .tex (単一 or 改行区切りで複数)"
+        required: true
+        type: string
+      texlive_version:
+        description: "Tex Live version (e.g., 2023, 2024, or latest)"
+        default: "latest"
+        type: string
+      latex_args:
+        description: "latexmk に渡す引数 (規定: -pdf ...)"
+        default: "-pdfdvi -file-line-error -halt-on-error -interaction=nonstopmode"
+        type: string
+      output_dir:
+        description: "生成したPDFを出力するディレクトリ (作業ブランチにコミット)"
+        default: "_pdf"
+        type: string
+      artifact_name:
+        description: "アップロードする成果物名"
+        default: "pdfs"
+        type: string
+      run_auto_commit:
+        description: "PDFを作業ブランチへコミットするか"
+        default: true
+        type: boolean
+      commit_message:
+        default: "chore: publish PDF [skip ci]"
+        description: "コミットメッセージ"
+        type: string
+      shell_escape:
+        description: "minted等で --shell-escape が必要な場合は true"
+        default: false
+        type: boolean
+      texinputs:
+        description: "TEXINPUTS 追加パス (e.g., ./template/)"
+        default: ""
+        type: string
+
+jobs:
+  tex-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.ref || github.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build PDFs
+        uses: xu-cheng/latex-action@v4
+        with:
+          root_file: ${{ inputs.root_file }}
+          texlive_version: ${{ inputs.texlive_version }}
+          args: ${{ inputs.latex_args }}
+          latexmk_shell_escape: ${{ inputs.shell_escape }}
+        env:
+          TEXINPUTS: ${{ inputs.texinputs }}
+
+      - name: Upload PDFs (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: "**/*.pdf"
+
+      - name: Collect PDFs to output_dir
+        run: |
+          set -eux
+          OUT="${{ inputs.output_dir }}"
+          mkdir -p "$OUT"
+          find . -type f -name '*.pdf' ! -path "./${OUT}/*" -exec cp -v {} "$OUT/" \;
+
+      - name: Create GitHub App token (for push)
+        id: app
+        if: >-
+          ${{ inputs.run_auto_commit
+            && github.event_name == 'pull_request'
+            && !github.event.pull_request.head.repo.fork }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_KEY }}
+
+      - name: Mask token
+        if: >-
+          ${{ inputs.run_auto_commit
+            && steps.app.outputs.token }}
+        run: echo "::add-mask::${{ steps.app.outputs.token }}"
+
+      # URLに埋め込まず，資格情報として登録
+      - name: Configure Git credentials (safer)
+        if: >-
+          ${{ inputs.run_auto_commit
+            && steps.app.outputs.token }}
+        shell: bash
+        run: |
+          set -eu
+          git config --global credential.useHttpPath true
+          git credential approve <<EOF
+          protocol=https
+          host=github.com
+          username=x-access-token
+          password=${{ steps.app.outputs.token }}
+          EOF
+          REPO="${{ github.event.pull_request.head.repo.full_name || github.repository }}"
+          git remote set-url origin "https://github.com/${REPO}.git"
+
+      - name: Commit and push PDFs to the same branch
+        if: >-
+          ${{ inputs.run_auto_commit
+            && steps.app.outputs.token }}
+        uses: EndBug/add-and-commit@v9
+        with:
+          add: ${{ inputs.output_dir }}
+          author_name: "github-actions[bot]"
+          message: ${{ inputs.commit_message }}
+          push: true
+          token: ${{ steps.app.outputs.token }}
